@@ -1,0 +1,26 @@
+#core api & framework
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+numpy
+
+# gemini embeddings and langchain
+google-generativeai
+langchain-google-genai
+sentence-transformers
+
+#vectordb and retrival
+qdrant-client
+
+#data ingestion and doc parsing
+unstructured>=0.18.32
+python-pptx
+python-docx
+pypdf
+beautifulsoup4
+pdfplumber
+
+#observability and logging and tracing
+logfire[fastapi,requests]
+loguru
