@@ -88,6 +88,11 @@ def embed_query(query:str) -> list[float]:
     else:
         return _active_model.encode([query])[0].tolist()
 
+
+def embed_text(text: str) -> list[float]:
+    """Convenience alias for embedding a single text string."""
+    return embed_query(text)
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     _init()
     all_embeddings: list[list[float]] = []
