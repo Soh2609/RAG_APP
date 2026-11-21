@@ -15,6 +15,9 @@ sentence-transformers>=3.0.0
 # Vector Database (Qdrant)
 qdrant-client>=1.12.0
 
+# LLM Generation (Groq / Llama 3.3)
+groq>=0.9.0
+
 # Data Ingestion & Document Parsing
 unstructured>=0.18.32
 python-pptx>=1.0.0

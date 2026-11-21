@@ -51,6 +51,11 @@ RAG_APP/
 │   │   ├── crawler.py             # BFS crawler with robots.txt compliance & atomic manifests
 │   │   └── pipeline.py            # Scraper-to-Qdrant bridge
 │   └── services/
+│       ├── generation/
+│       │   ├── __init__.py        # Package exports (GroqGenerator, QuestionAnswerEngine, etc.)
+│       │   ├── models.py          # Citation and GeneratedAnswer DTOs with token usage
+│       │   ├── prompts.py         # Anti-injection framing, context budgeting & delimiters
+│       │   └── generator.py       # Groq Llama 3.3 generator & QuestionAnswerEngine pipeline
 │       └── retrieval/
 │           ├── __init__.py        # Clean package interface for retrieval & embeddings
 │           ├── qdrant.py          # Model-partitioned collections & dimension guard
@@ -59,13 +64,14 @@ RAG_APP/
 ├── data/                          # Input data directory
 │   └── scraped/                   # Crawled HTML pages & manifests per domain
 ├── processed_data/                # Cached JSON chunk artifacts & audit logs
-├── tests/                         # Comprehensive unit & integration test suite (36 tests, 100% pass)
+├── tests/                         # Comprehensive unit & integration test suite (46 tests, 100% pass)
 │   ├── test_url_utils.py          # URL cleaning & validation unit tests
 │   ├── test_fetcher.py            # HTTP fetcher & HTML extraction unit tests
 │   ├── test_crawler.py            # BFS crawler & manifest unit tests
 │   ├── test_pipeline.py           # Scrape-and-ingest bridge unit tests
 │   ├── test_enterprise_pipeline.py# Decoupled Two-Stage Pipeline unit tests
 │   ├── test_retriever.py          # Vector search, metadata filtering & threshold tests
+│   ├── test_generator.py          # Groq generator, prompt budgeting & anti-injection tests
 │   ├── test_post_review_hardening.py # SSRF, robots.txt, dimension guards & purge tests
 │   └── eval/                      # Retrieval quality benchmarking
 │       ├── golden_dataset.json    # Question-to-chunk ground truth evaluation set
@@ -149,8 +155,22 @@ python -m app.services.retrieval.retriever --query "What is the retry policy?" -
 python -m app.services.retrieval.retriever --query "How to configure embeddings?" --min-score 0.70
 ```
 
-### 5. Run Unit Tests & Evaluation
-Run the entire test suite (100% pass across 36 tests) and check coverage:
+### 5. Question Answering with LLM Generation (Groq / Llama 3.3)
+Query the end-to-end RAG system to retrieve grounded documentation chunks and generate cited answers using Groq's high-speed `llama-3.3-70b-versatile`:
+
+```bash
+# 1. Ask a question across the indexed knowledge base
+python -m app.services.generation.generator --query "What is the chunking strategy used in this project?"
+
+# 2. Ask with top-k context chunk limit and similarity threshold
+python -m app.services.generation.generator --query "How does SSRF protection work?" --top-k 3 --min-score 0.70
+
+# 3. Filter retrieval by source type
+python -m app.services.generation.generator --query "What are the crawler rate limits?" --source-type web_documentation
+```
+
+### 6. Run Unit Tests & Evaluation
+Run the entire test suite (100% pass across 46 tests) and check coverage:
 
 ```bash
 # Run all unit tests
@@ -168,5 +188,5 @@ coverage report --omit="tests/*"
 - [x] **Phase 1**: Ingestion Engine & Loaders (Completed)
 - [x] **Phase 2**: Automated Web Scraper & Documentation Crawler (Completed)
 - [x] **Phase 3**: Vector Search & Semantic Retriever Service (Completed)
-- [ ] **Phase 4**: LLM Answer Generation (Groq / Llama 3.3)
+- [x] **Phase 4**: LLM Answer Generation (Groq / Llama 3.3) (Completed)
 - [ ] **Phase 5**: FastAPI REST Endpoints (`/ask`, `/ingest`)
