@@ -85,3 +85,45 @@ Unify Web Scraping (Data Acquisition) and Vector Ingestion (Processing & Loading
   - Test full linked execution (Stage 1 $\to$ Stage 2).
   - Test incremental hashing logic.
   - All 21 tests across 5 test suites passing (100%).
+
+
+---
+
+## Phase 3: Vector Search & Semantic Retriever Service — Execution Plan
+
+### Objective
+Build a high-performance, filter-aware Semantic Retriever Service (`app/services/retrival/retriever.py`) that converts natural language user queries into dense vector embeddings, performs similarity search in Qdrant, applies metadata filters (e.g., by `source_type` or `source_file`), filters by relevance score threshold, and outputs structured, citation-ready context chunks for downstream LLM generation.
+
+---
+
+### Task Decomposition (Small Functional Goals)
+
+```mermaid
+flowchart TD
+    T1["Sub-task 3.1: Retrieval Data Models & DTOs\n(RetrievedChunk, RetrievalResult)"] --> T2["Sub-task 3.2: Dynamic Metadata Filter Builder\n(build_qdrant_filter)"]
+    T2 --> T3["Sub-task 3.3: Core Semantic Retriever Engine\n(SemanticRetriever, retrieve)"]
+    T3 --> T4["Sub-task 3.4: CLI Query & Inspection Tool\n(app/services/retrival/retriever.py)"]
+    T4 --> T5["Sub-task 3.5: Comprehensive Unit Test Suite\n(tests/test_retriever.py)"]
+```
+
+### Sub-tasks
+- [x] **Sub-task 3.1: Retrieval Data Models & Contracts (`app/services/retrival/retriever.py`)**
+  - Implement `RetrievedChunk`: Holds `chunk_id`, `text`, `score` (cosine similarity), `source_file`, `source_path`, `source_type`, `chunk_index`, `total_chunks`, and additional payload metadata.
+  - Implement `RetrievalResult`: Unified search report containing original query, list of `RetrievedChunk` instances, `total_found`, latency in milliseconds, applied filter details, and vector dimension.
+- [x] **Sub-task 3.2: Dynamic Metadata Filter Builder**
+  - Implement `build_qdrant_filter()`: Generates Qdrant `models.Filter` for `source_type` (single value or list via `MatchAny`), `source_file`, or custom payload conditions.
+- [x] **Sub-task 3.3: Core Semantic Retriever Engine**
+  - Implement `SemanticRetriever` class with:
+    - Lazy/resilient Qdrant client connection (supporting both remote cloud and local embedded storage).
+    - Query embedding via `embed_query()` with dual Gemini/SentenceTransformers fallback.
+    - Version-agnostic vector search (supporting `client.query_points` and fallback `client.search`).
+    - Cosine similarity score thresholding (`score_threshold: Optional[float] = None`).
+    - Structured latency and span tracing via Logfire.
+- [x] **Sub-task 3.4: CLI Query & Inspection Interface**
+  - CLI arguments: `--query`, `--top-k`, `--min-score`, `--source-type`, `--source-file`, `--collection`.
+- [x] **Sub-task 3.5: Unit Test Suite & Verification (`tests/test_retriever.py`)**
+  - Test query validation and empty string rejection.
+  - Test filter construction (exact match and list matching).
+  - Test search execution, payload mapping, and score thresholding.
+  - Test integration on live/embedded Qdrant instance with synthetic indexed chunks.
+  - Result: All 7 unit tests passing (28 total tests in project, 100% pass rate).

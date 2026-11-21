@@ -46,16 +46,20 @@ RAG_APP/
 │   │   └── pipeline.py            # Scraper-to-Qdrant bridge
 │   └── services/
 │       └── retrival/
-│           └── embeddings.py      # Dual-mode embedding service (Gemini + Local)
+│           ├── __init__.py        # Clean package interface for retrieval & embeddings
+│           ├── qdrant.py          # Centralized Qdrant client & collection manager
+│           ├── embeddings.py      # Dual-mode embedding service (Gemini + Local)
+│           └── retriever.py       # High-performance semantic retriever & pre-filter engine
 ├── data/                          # Input data directory
 │   └── scraped/                   # Crawled HTML pages & manifests per domain
 ├── processed_data/                # Cached JSON chunk artifacts & audit logs
-├── tests/                         # Comprehensive unit test suite (21 tests, 100% pass)
+├── tests/                         # Comprehensive unit test suite (28 tests, 100% pass)
 │   ├── test_url_utils.py          # URL cleaning & validation unit tests
 │   ├── test_fetcher.py            # HTTP fetcher & HTML extraction unit tests
 │   ├── test_crawler.py            # BFS crawler & manifest unit tests
 │   ├── test_pipeline.py           # Scrape-and-ingest bridge unit tests
-│   └── test_enterprise_pipeline.py# Decoupled Two-Stage Pipeline unit tests
+│   ├── test_enterprise_pipeline.py# Decoupled Two-Stage Pipeline unit tests
+│   └── test_retriever.py          # Vector search, metadata filtering & threshold tests
 ├── main.py                        # Application entry point
 ├── requirements.txt               # Project dependencies
 └── .env                           # Environment variables (API keys)
@@ -111,8 +115,22 @@ python -m app.pipeline --dir data/scraped/docs.example.com --stage-2-only
 python -m app.pipeline --dir data --source-type enterprise_manuals
 ```
 
+### 4. Semantic Vector Search & Retrieval
+Query your indexed vector database using the high-performance Semantic Retriever CLI with optional pre-filtering and score thresholding:
+
+```bash
+# 1. Basic semantic query (top 3 chunks)
+python -m app.services.retrival.retriever --query "How does the text chunker work?" --top-k 3
+
+# 2. Query with metadata pre-filtering (e.g. only web documentation)
+python -m app.services.retrival.retriever --query "What is the retry policy?" --source-type web_documentation
+
+# 3. Query with minimum similarity confidence threshold
+python -m app.services.retrival.retriever --query "How to configure embeddings?" --min-score 0.70
+```
+
 ### 5. Run Unit Tests
-Run the entire unit test suite:
+Run the entire unit test suite (100% pass across 28 tests):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -124,6 +142,6 @@ python -m unittest discover -s tests -p "test_*.py"
 
 - [x] **Phase 1**: Ingestion Engine & Loaders (Completed)
 - [x] **Phase 2**: Automated Web Scraper & Documentation Crawler (Completed)
-- [ ] **Phase 3**: Vector Search & Semantic Retriever Service
+- [x] **Phase 3**: Vector Search & Semantic Retriever Service (Completed)
 - [ ] **Phase 4**: LLM Answer Generation (Groq / Llama 3.3)
 - [ ] **Phase 5**: FastAPI REST Endpoints (`/ask`, `/ingest`)
