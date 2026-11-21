@@ -1,11 +1,13 @@
 import argparse
 import json
 from typing import Any, Dict, Optional
+import warnings
 
 import logfire
 
-from app.ingestion.processor import ensure_collection, get_qdrant_client, process_directory
+from app.ingestion.processor import process_directory
 from app.scraper.crawler import CrawlSummary, DocumentationCrawler
+from app.services.retrieval.qdrant import ensure_collection, get_qdrant_client
 
 try:
     logfire.configure(service_name="scraper-service", send_to_logfire="if-token-present")
@@ -30,6 +32,8 @@ def scrape_and_ingest(
     2. Stores HTML files and manifest.json into data/scraped/<domain>.
     3. If auto_ingest is True, runs Phase 1 ingestion processor on scraped pages,
        embedding chunks and upserting into Qdrant.
+
+    Note: In new code, prefer `app.pipeline.TwoStagePipeline`.
     """
     with logfire.span("Scrape and Ingest Pipeline", url=start_url, auto_ingest=auto_ingest):
         # Step 1: Execute web crawl
@@ -61,7 +65,7 @@ def scrape_and_ingest(
         if auto_ingest and crawl_summary.total_pages_scraped > 0:
             logfire.info(f"Triggering automatic vector ingestion for {crawl_summary.output_dir}...")
             client = get_qdrant_client()
-            ensure_collection(client, recreate=wipe)
+            target_col = ensure_collection(client, recreate=wipe)
 
             tag = source_type or f"web_{crawl_summary.domain}"
             ingestion_res = process_directory(

@@ -28,40 +28,51 @@ This repository provides a modular, production-ready ingestion, crawling, and re
 
 ```text
 RAG_APP/
-├── Action Plan/                   # Strategic engineering plans & decisions logs
+├── Action Plan/                   # Initial engineering plans & decisions logs
 │   ├── plan.md                    # Phase-by-phase execution plan & task tracker
 │   └── decisions.md               # Architectural decisions, coding patterns & rationale
+├── Action plan after review/      # Post-review hardening plans & ADRs
+│   ├── plans_after_review.md      # Prioritized remediation tasks & progress
+│   └── descisions_after_review.md # Security mitigations & architecture ADRs
 ├── app/
-│   ├── config.py                  # Environment settings & secrets loader
+│   ├── config.py                  # Pydantic Settings with startup validation
 │   ├── pipeline.py                # Unified Two-Stage Enterprise Pipeline orchestrator
+│   ├── core/                      # System protocols and exception hierarchy
+│   │   ├── exceptions.py          # Domain exceptions (RAGError, SSRFSecurityError, etc.)
+│   │   └── interfaces.py          # Structural protocols (DocumentLoader, EmbeddingService, VectorStore)
 │   ├── ingestion/
-│   │   ├── processor.py           # Core ETL orchestrator & Qdrant indexer
+│   │   ├── processor.py           # Core ETL orchestrator, purge-before-upsert & Qdrant indexer
 │   │   ├── chunking/
 │   │   │   └── splitter.py        # Semantic chunker with sliding context overlap
 │   │   └── loaders/               # Multi-format file parsers (HTML, PDF, Text, Office)
 │   ├── scraper/
-│   │   ├── url_utils.py           # Canonical URL cleaning & asset filtering
-│   │   ├── fetcher.py             # Connection-pooled HTTP fetcher & HTML extractor
-│   │   ├── crawler.py             # BFS documentation crawler engine & manifest writer
+│   │   ├── url_utils.py           # Canonical URL cleaning, SSRF validation & IP filtering
+│   │   ├── fetcher.py             # Connection-pooled HTTP fetcher, body caps & boilerplate cleaner
+│   │   ├── crawler.py             # BFS crawler with robots.txt compliance & atomic manifests
 │   │   └── pipeline.py            # Scraper-to-Qdrant bridge
 │   └── services/
-│       └── retrival/
+│       └── retrieval/
 │           ├── __init__.py        # Clean package interface for retrieval & embeddings
-│           ├── qdrant.py          # Centralized Qdrant client & collection manager
-│           ├── embeddings.py      # Dual-mode embedding service (Gemini + Local)
+│           ├── qdrant.py          # Model-partitioned collections & dimension guard
+│           ├── embeddings.py      # Dual-mode embedding service with jitter & fail-fast controls
 │           └── retriever.py       # High-performance semantic retriever & pre-filter engine
 ├── data/                          # Input data directory
 │   └── scraped/                   # Crawled HTML pages & manifests per domain
 ├── processed_data/                # Cached JSON chunk artifacts & audit logs
-├── tests/                         # Comprehensive unit test suite (28 tests, 100% pass)
+├── tests/                         # Comprehensive unit & integration test suite (36 tests, 100% pass)
 │   ├── test_url_utils.py          # URL cleaning & validation unit tests
 │   ├── test_fetcher.py            # HTTP fetcher & HTML extraction unit tests
 │   ├── test_crawler.py            # BFS crawler & manifest unit tests
 │   ├── test_pipeline.py           # Scrape-and-ingest bridge unit tests
 │   ├── test_enterprise_pipeline.py# Decoupled Two-Stage Pipeline unit tests
-│   └── test_retriever.py          # Vector search, metadata filtering & threshold tests
+│   ├── test_retriever.py          # Vector search, metadata filtering & threshold tests
+│   ├── test_post_review_hardening.py # SSRF, robots.txt, dimension guards & purge tests
+│   └── eval/                      # Retrieval quality benchmarking
+│       ├── golden_dataset.json    # Question-to-chunk ground truth evaluation set
+│       └── evaluate_retrieval.py  # Recall@K and MRR evaluation harness
 ├── main.py                        # Application entry point
 ├── requirements.txt               # Project dependencies
+├── .env.example                   # Reference environment configuration
 └── .env                           # Environment variables (API keys)
 ```
 
@@ -73,15 +84,18 @@ RAG_APP/
 Install dependencies into a virtual environment:
 
 ```bash
-# Activate your environment
+# Windows:
 .venv\Scripts\activate
+
+# Linux / macOS:
+source .venv/bin/activate
 
 # Install requirements
 pip install -r requirements.txt
 ```
 
 ### 2. Configure Credentials (`.env`)
-Create or edit your `.env` file in the project root:
+Create or edit your `.env` file in the project root (refer to `.env.example`):
 
 ```env
 # Gemini Embeddings
@@ -90,9 +104,15 @@ GEMINI_API_KEY=your_gemini_api_key
 # Qdrant Vector DB (Cloud or leave blank for automatic local storage)
 Qdrant_Cluster_Endpoint=https://your-cluster-url.qdrant.io
 Qdrant_Api_Key=your_qdrant_api_key
+QDRANT_COLLECTION=enterprise_rag
 
 # Groq LLM (for answer generation)
 groq_api_key=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
+
+# Safety Gates (set to false in production to fail-fast)
+ALLOW_EMBEDDING_FALLBACK=true
+QDRANT_ALLOW_LOCAL_FALLBACK=true
 ```
 
 ### 3. Run Unified Two-Stage Enterprise Pipeline
@@ -120,20 +140,25 @@ Query your indexed vector database using the high-performance Semantic Retriever
 
 ```bash
 # 1. Basic semantic query (top 3 chunks)
-python -m app.services.retrival.retriever --query "How does the text chunker work?" --top-k 3
+python -m app.services.retrieval.retriever --query "How does the text chunker work?" --top-k 3
 
 # 2. Query with metadata pre-filtering (e.g. only web documentation)
-python -m app.services.retrival.retriever --query "What is the retry policy?" --source-type web_documentation
+python -m app.services.retrieval.retriever --query "What is the retry policy?" --source-type web_documentation
 
 # 3. Query with minimum similarity confidence threshold
-python -m app.services.retrival.retriever --query "How to configure embeddings?" --min-score 0.70
+python -m app.services.retrieval.retriever --query "How to configure embeddings?" --min-score 0.70
 ```
 
-### 5. Run Unit Tests
-Run the entire unit test suite (100% pass across 28 tests):
+### 5. Run Unit Tests & Evaluation
+Run the entire test suite (100% pass across 36 tests) and check coverage:
 
 ```bash
+# Run all unit tests
 python -m unittest discover -s tests -p "test_*.py"
+
+# Run with test coverage
+coverage run -m unittest discover -s tests -p "test_*.py"
+coverage report --omit="tests/*"
 ```
 
 ---

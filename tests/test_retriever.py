@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-from app.services.retrival.retriever import (
+from app.services.retrieval.retriever import (
     RetrievalResult,
     RetrievedChunk,
     SemanticRetriever,
@@ -73,7 +73,7 @@ class TestRetriever(unittest.TestCase):
         self.assertEqual(r_dict["latency_ms"], 12.5)
         self.assertEqual(len(r_dict["chunks"]), 1)
 
-    @patch("app.services.retrival.retriever.embed_query")
+    @patch("app.services.retrieval.retriever.embed_query")
     def test_retrieve_with_mocked_qdrant(self, mock_embed_query):
         mock_embed_query.return_value = [0.1, 0.2, 0.3, 0.4]
 
@@ -112,7 +112,7 @@ class TestRetriever(unittest.TestCase):
         self.assertEqual(res.chunks[0].score, 0.885)
         self.assertEqual(res.chunks[0].metadata["custom_tag"], "v1")
 
-    @patch("app.services.retrival.retriever.embed_query")
+    @patch("app.services.retrieval.retriever.embed_query")
     def test_retrieve_in_memory_integration(self, mock_embed_query):
         # Deterministic mock query embedding
         mock_embed_query.return_value = [1.0, 0.0, 0.0, 0.0]

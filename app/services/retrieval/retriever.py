@@ -9,8 +9,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 from app.config import settings
-from app.services.retrival.embeddings import embed_query, get_embedding_dim
-from app.services.retrival.qdrant import get_qdrant_client
+from app.services.retrieval.embeddings import embed_query, get_embedding_dim
+from app.services.retrieval.qdrant import get_qdrant_client, resolve_collection_name
 
 try:
     logfire.configure(service_name="retrieval-service", send_to_logfire="if-token-present")
@@ -45,6 +45,7 @@ class RetrievalResult:
     latency_ms: float
     applied_filters: Dict[str, Any] = field(default_factory=dict)
     embedding_dim: int = 0
+    retrieval_status: str = "ok"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -53,6 +54,7 @@ class RetrievalResult:
             "latency_ms": self.latency_ms,
             "applied_filters": self.applied_filters,
             "embedding_dim": self.embedding_dim,
+            "retrieval_status": self.retrieval_status,
             "chunks": [c.to_dict() for c in self.chunks],
         }
 
@@ -124,7 +126,7 @@ def build_qdrant_filter(
 class SemanticRetriever:
     """Production-grade Semantic Retriever for Qdrant.
 
-    Embeds queries using the configured embedding engine (Gemini with SentenceTransformers fallback),
+    Embeds queries using the active embedding engine (Gemini or SentenceTransformers fallback),
     applies native pre-filtering on metadata payloads, and ranks results by vector similarity.
     """
 
@@ -133,8 +135,15 @@ class SemanticRetriever:
         collection_name: Optional[str] = None,
         client: Optional[QdrantClient] = None,
     ):
-        self.collection_name = collection_name or settings.qdrant_collection
+        self.raw_collection_name = collection_name
+        self._collection_name = collection_name
         self._client = client
+
+    @property
+    def collection_name(self) -> str:
+        if self._collection_name is None:
+            self._collection_name = resolve_collection_name(self.raw_collection_name)
+        return self._collection_name
 
     def get_client(self) -> QdrantClient:
         """Lazily acquires the Qdrant client."""
@@ -156,6 +165,10 @@ class SemanticRetriever:
             raise ValueError("Query string cannot be empty")
 
         cleaned_query = query.strip()
+        if len(cleaned_query) > 4000:
+            logfire.warning(f"Query length ({len(cleaned_query)} chars) exceeds 4000 chars. Truncating.")
+            cleaned_query = cleaned_query[:4000]
+
         t0 = time.time()
 
         with logfire.span("Semantic Retrieval", query=cleaned_query, top_k=top_k):
@@ -228,6 +241,14 @@ class SemanticRetriever:
             if score_threshold is not None:
                 applied_filters_summary["score_threshold"] = score_threshold
 
+            # Determine structured retrieval status
+            if retrieved_chunks:
+                status = "ok"
+            elif query_filter is not None:
+                status = "filtered_empty"
+            else:
+                status = "no_results"
+
             result = RetrievalResult(
                 query=cleaned_query,
                 chunks=retrieved_chunks,
@@ -235,10 +256,11 @@ class SemanticRetriever:
                 latency_ms=elapsed_ms,
                 applied_filters=applied_filters_summary,
                 embedding_dim=dim,
+                retrieval_status=status,
             )
 
             logfire.info(
-                f"Retrieved {len(retrieved_chunks)} chunks in {elapsed_ms}ms for query: '{cleaned_query[:60]}...'"
+                f"Retrieved {len(retrieved_chunks)} chunks in {elapsed_ms}ms (status={status}) for query: '{cleaned_query[:60]}...'"
             )
             return result
 

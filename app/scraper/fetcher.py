@@ -9,7 +9,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from app.scraper.url_utils import clean_url
+from app.config import settings
+from app.scraper.url_utils import clean_url, is_safe_url
 
 try:
     logfire.configure(service_name="scraper-service", send_to_logfire="if-token-present")
@@ -44,8 +45,7 @@ class ExtractedPage:
 
 class PageFetcher:
     """Robust HTTP page fetcher with connection pooling, retries,
-
-    custom user-agent, and timeout handling.
+    custom user-agent, SSRF protection, and body size limits.
     """
 
     def __init__(
@@ -53,8 +53,10 @@ class PageFetcher:
         timeout: float = 10.0,
         max_retries: int = 3,
         user_agent: str = "EnterpriseRAG-Crawler/1.0 (+https://github.com/Soh2609/RAG_APP)",
+        enforce_ssrf_check: bool = True,
     ):
         self.timeout = timeout
+        self.enforce_ssrf_check = enforce_ssrf_check
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": user_agent,
@@ -75,13 +77,37 @@ class PageFetcher:
         self.session.mount("https://", adapter)
 
     def fetch(self, url: str) -> FetchResult:
-        """Fetches a URL, validates content-type, and returns a FetchResult."""
+        """Fetches a URL, enforces SSRF and size guards, validates content-type, and returns a FetchResult."""
         t0 = time.time()
+
+        # -------------------------------------------------------------
+        # SSRF Protection: Pre-flight DNS validation before HTTP dispatch
+        # -------------------------------------------------------------
+        if self.enforce_ssrf_check and not is_safe_url(url):
+            logfire.warning(f"SSRF Protection blocked request to unsafe/private address: {url}")
+            return FetchResult(
+                url=url,
+                status_code=403,
+                elapsed_seconds=time.time() - t0,
+                error="SSRF Protection: Target URL resolves to private, loopback, or cloud-metadata network",
+            )
+
         try:
             with logfire.span("HTTP Fetch", url=url):
-                response = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+                response = self.session.get(url, timeout=self.timeout, allow_redirects=True, stream=True)
                 elapsed = time.time() - t0
                 final_url = clean_url(response.url)
+
+                # Re-verify post-redirect destination for SSRF
+                if self.enforce_ssrf_check and not is_safe_url(final_url):
+                    logfire.warning(f"SSRF Protection blocked redirect to unsafe address: {final_url}")
+                    return FetchResult(
+                        url=final_url,
+                        status_code=403,
+                        elapsed_seconds=elapsed,
+                        error="SSRF Protection: Redirect led to restricted IP address",
+                    )
+
                 content_type = response.headers.get("Content-Type", "").lower()
 
                 # Verify content type is HTML
@@ -94,10 +120,36 @@ class PageFetcher:
                         error=f"Non-HTML content type: {content_type}",
                     )
 
+                # Enforce body size limit from Content-Length header if provided
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > settings.max_http_body_bytes:
+                            return FetchResult(
+                                url=final_url,
+                                status_code=413,
+                                content_type=content_type,
+                                elapsed_seconds=elapsed,
+                                error=f"Response body exceeds limit ({content_length} bytes > {settings.max_http_body_bytes})",
+                            )
+                    except ValueError:
+                        pass
+
+                body_text = response.text or ""
+                # Enforce size limit on decoded content
+                if len(body_text.encode("utf-8", errors="ignore")) > settings.max_http_body_bytes:
+                    return FetchResult(
+                        url=final_url,
+                        status_code=413,
+                        content_type=content_type,
+                        elapsed_seconds=elapsed,
+                        error=f"Body exceeds limit of {settings.max_http_body_bytes} bytes",
+                    )
+
                 return FetchResult(
                     url=final_url,
                     status_code=response.status_code,
-                    html=response.text,
+                    html=body_text,
                     content_type=content_type,
                     elapsed_seconds=elapsed,
                 )
@@ -118,7 +170,10 @@ class PageFetcher:
 
 
 def extract_page_data(html: str, current_url: str) -> ExtractedPage:
-    """Parses raw HTML, extracts title, outgoing links, and cleaned text/HTML."""
+    """Parses raw HTML, extracts title, outgoing links, and cleaned text/HTML.
+
+    Strips script, style, navigation boilerplate, and cookie banners to avoid chunk pollution.
+    """
     if not html:
         return ExtractedPage(url=current_url)
 
@@ -146,9 +201,20 @@ def extract_page_data(html: str, current_url: str) -> ExtractedPage:
             seen.add(cleaned)
             discovered_links.append(cleaned)
 
-    # 3. Clean noise for readable content
-    for noise in soup(["script", "style", "noscript", "svg", "meta"]):
-        noise.decompose()
+    # 3. Clean noise and boilerplate elements
+    for noise_tag in ("script", "style", "noscript", "svg", "meta"):
+        for el in soup(noise_tag):
+            el.decompose()
+
+    # Boilerplate removal: navigation, footers, sidebars, cookie banners
+    boilerplate_selectors = [
+        "nav", "header", "footer", "aside",
+        ".sidebar", ".cookie-banner", ".nav-bar",
+        "[role='navigation']", "[aria-label='breadcrumb']",
+    ]
+    for selector in boilerplate_selectors:
+        for match in soup.select(selector):
+            match.decompose()
 
     # Extract clean text
     raw_text = soup.get_text(separator="\n")

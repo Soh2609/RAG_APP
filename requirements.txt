@@ -1,26 +1,31 @@
-#core api & framework
-fastapi
-uvicorn[standard]
-python-dotenv
-requests
-numpy
+# Core API & Configuration
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.7.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+numpy>=1.26.0
 
-# gemini embeddings and langchain
-google-generativeai
-langchain-google-genai
-sentence-transformers
+# Gemini Embeddings & Local Fallback
+google-generativeai>=0.8.0
+langchain-google-genai>=2.0.0
+sentence-transformers>=3.0.0
 
-#vectordb and retrival
-qdrant-client
+# Vector Database (Qdrant)
+qdrant-client>=1.12.0
 
-#data ingestion and doc parsing
+# Data Ingestion & Document Parsing
 unstructured>=0.18.32
-python-pptx
-python-docx
-pypdf
-beautifulsoup4
-pdfplumber
+python-pptx>=1.0.0
+python-docx>=1.1.0
+pypdf>=5.0.0
+beautifulsoup4>=4.12.0
+pdfplumber>=0.11.0
 
-#observability and logging and tracing
-logfire[fastapi,requests]
-loguru
+# Observability, Logging & Tracing
+logfire[fastapi,requests]>=3.0.0
+loguru>=0.7.0
+
+# Testing & Quality
+coverage>=7.0.0
