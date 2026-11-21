@@ -85,3 +85,91 @@ Unify Web Scraping (Data Acquisition) and Vector Ingestion (Processing & Loading
   - Test full linked execution (Stage 1 $\to$ Stage 2).
   - Test incremental hashing logic.
   - All 21 tests across 5 test suites passing (100%).
+
+
+---
+
+## Phase 3: Vector Search & Semantic Retriever Service — Execution Plan
+
+### Objective
+Build a high-performance, filter-aware Semantic Retriever Service (`app/services/retrival/retriever.py`) that converts natural language user queries into dense vector embeddings, performs similarity search in Qdrant, applies metadata filters (e.g., by `source_type` or `source_file`), filters by relevance score threshold, and outputs structured, citation-ready context chunks for downstream LLM generation.
+
+---
+
+### Task Decomposition (Small Functional Goals)
+
+```mermaid
+flowchart TD
+    T1["Sub-task 3.1: Retrieval Data Models & DTOs\n(RetrievedChunk, RetrievalResult)"] --> T2["Sub-task 3.2: Dynamic Metadata Filter Builder\n(build_qdrant_filter)"]
+    T2 --> T3["Sub-task 3.3: Core Semantic Retriever Engine\n(SemanticRetriever, retrieve)"]
+    T3 --> T4["Sub-task 3.4: CLI Query & Inspection Tool\n(app/services/retrival/retriever.py)"]
+    T4 --> T5["Sub-task 3.5: Comprehensive Unit Test Suite\n(tests/test_retriever.py)"]
+```
+
+### Sub-tasks
+- [x] **Sub-task 3.1: Retrieval Data Models & Contracts (`app/services/retrival/retriever.py`)**
+  - Implement `RetrievedChunk`: Holds `chunk_id`, `text`, `score` (cosine similarity), `source_file`, `source_path`, `source_type`, `chunk_index`, `total_chunks`, and additional payload metadata.
+  - Implement `RetrievalResult`: Unified search report containing original query, list of `RetrievedChunk` instances, `total_found`, latency in milliseconds, applied filter details, and vector dimension.
+- [x] **Sub-task 3.2: Dynamic Metadata Filter Builder**
+  - Implement `build_qdrant_filter()`: Generates Qdrant `models.Filter` for `source_type` (single value or list via `MatchAny`), `source_file`, or custom payload conditions.
+- [x] **Sub-task 3.3: Core Semantic Retriever Engine**
+  - Implement `SemanticRetriever` class with:
+    - Lazy/resilient Qdrant client connection (supporting both remote cloud and local embedded storage).
+    - Query embedding via `embed_query()` with dual Gemini/SentenceTransformers fallback.
+    - Version-agnostic vector search (supporting `client.query_points` and fallback `client.search`).
+    - Cosine similarity score thresholding (`score_threshold: Optional[float] = None`).
+    - Structured latency and span tracing via Logfire.
+- [x] **Sub-task 3.4: CLI Query & Inspection Interface**
+  - CLI arguments: `--query`, `--top-k`, `--min-score`, `--source-type`, `--source-file`, `--collection`.
+- [x] **Sub-task 3.5: Unit Test Suite & Verification (`tests/test_retriever.py`)**
+  - Test query validation and empty string rejection.
+  - Test filter construction (exact match and list matching).
+  - Test search execution, payload mapping, and score thresholding.
+  - Test integration on live/embedded Qdrant instance with synthetic indexed chunks.
+  - Result: All 7 unit tests passing (28 total tests in project, 100% pass rate).
+
+---
+
+## Phase 4: LLM Generation Service (Groq / Llama 3.3) — Execution Plan
+
+### Objective
+Build a secure, citation-grounded Question-Answering Generation Engine (`app/services/generation/`) that integrates Phase 3's semantic retriever with Groq's high-speed Llama 3.3 model (`llama-3.3-70b-versatile`). The engine frames ingested context as untrusted data to mitigate prompt injection, generates direct answers, attaches structured provenance citations, enforces token budgeting, and short-circuits on empty retrieval to save costs.
+
+---
+
+### Task Decomposition (Small Functional Goals)
+
+```mermaid
+flowchart TD
+    T1["Sub-task 4.1: Generation Data Models & DTOs\n(Citation, GeneratedAnswer, PromptContext)"] --> T2["Sub-task 4.2: Prompt Template & Security Guardrails\n(Untrusted Context Framing, Anti-Injection, Strict Grounding)"]
+    T2 --> T3["Sub-task 4.3: Groq LLM Client & Service Layer\n(GroqGenerator, Token Budgeting, Temperature Controls)"]
+    T3 --> T4["Sub-task 4.4: End-to-End RAG QA Pipeline\n(QuestionAnswerEngine: Retrieve -> Ground -> Generate -> Cite)"]
+    T4 --> T5["Sub-task 4.5: Interactive CLI QA Interface\n(python -m app.services.generation.generator)"]
+    T4 --> T6["Sub-task 4.6: Comprehensive Unit & Mock Test Suite\n(tests/test_generator.py)"]
+```
+
+### Sub-tasks
+- [x] **Sub-task 4.1: Generation Data Models & Contracts (`app/services/generation/models.py`)**
+  - Implement `Citation`: Encapsulates `source_file`, `source_path`, `source_type`, `chunk_index`, similarity `score`, and citation reference marker (`[1]`).
+  - Implement `GeneratedAnswer`: Unified answer DTO containing `question`, `answer`, `citations`, `model`, `latency_ms`, token usage (`prompt_tokens`, `completion_tokens`, `total_tokens`), `grounded` boolean flag, and `to_dict()`.
+- [x] **Sub-task 4.2: Prompt Template & Security Guardrails (`app/services/generation/prompts.py`)**
+  - Implement system prompt framing all retrieved context as untrusted reference data with explicit instructions to ignore instructions embedded inside context blocks.
+  - Enforce strict negative constraint: "If the context does not contain sufficient facts to answer the question, state: 'I don't have enough information in the provided documentation to answer this question.'"
+  - Implement context budget formatter that numbers chunks `[1]`, `[2]` and truncates at `max_context_chars` (default 24,000 chars) to prevent context window overflow.
+- [x] **Sub-task 4.3: Groq LLM Client & Service Layer (`app/services/generation/generator.py`)**
+  - Implement `GroqGenerator` with lazy Groq client initialization, dependency injection support for unit testing, and structured Logfire spans.
+  - Implement answer generation with low temperature (`temperature=0.1`) for factual determinism.
+  - Implement groundedness heuristic: detects whether LLM expressed lack of information and marks `grounded=False`.
+- [x] **Sub-task 4.4: End-to-End RAG QA Pipeline (`QuestionAnswerEngine`)**
+  - Connect `SemanticRetriever` to `GroqGenerator`.
+  - Implement short-circuit evaluation: if retrieval finds 0 chunks or filter yields empty results, immediately return ungrounded answer without consuming Groq API tokens.
+- [x] **Sub-task 4.5: Interactive CLI QA Interface**
+  - Provide CLI flags: `--query`, `--top-k`, `--min-score`, `--source-type`, `--source-file`, `--model`.
+  - Format terminal output with markdown answer, citation reference table, and performance metrics.
+- [x] **Sub-task 4.6: Unit Test Suite & Verification (`tests/test_generator.py`)**
+  - Test prompt formatting and anti-injection system prompt construction.
+  - Test context truncation and budgeting.
+  - Test short-circuit behavior on empty retrieval.
+  - Test mocked Groq API generation, token extraction, and citation mapping.
+  - Test groundedness detection flag.
+  - Result: All 10 unit tests passing (46 total tests across the repository, 100% pass rate).

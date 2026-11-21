@@ -223,7 +223,7 @@ class TwoStagePipeline:
 
         with logfire.span("Stage 2 Indexing", dir=staged_dir, source_type=source_type, incremental=incremental):
             client = get_qdrant_client()
-            ensure_collection(client, collection_name=self.collection_name, recreate=wipe)
+            target_col = ensure_collection(client, collection_name=self.collection_name, recreate=wipe)
 
             # Discover all supported documents
             files_to_process: List[Path] = []
@@ -264,6 +264,7 @@ class TwoStagePipeline:
                         file_path=str(file_path),
                         filename=file_path.name,
                         source_type=source_type,
+                        collection_name=target_col,
                     )
                     results.append(res)
                     if res.get("status") == "success":

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "eval_1",
+    "question": "How does the text chunker split oversized paragraphs?",
+    "expected_keywords": ["recursive", "separator", "max_size", "overlap"],
+    "expected_source_type": "web_documentation"
+  },
+  {
+    "id": "eval_2",
+    "question": "What is the SSRF protection mechanism in the crawler?",
+    "expected_keywords": ["ssrf", "private", "loopback", "metadata", "ip"],
+    "expected_source_type": "web_documentation"
+  },
+  {
+    "id": "eval_3",
+    "question": "How are stale chunks purged when a document is re-ingested?",
+    "expected_keywords": ["delete", "purge", "source_file", "idempotent"],
+    "expected_source_type": "web_documentation"
+  },
+  {
+    "id": "eval_4",
+    "question": "How does Qdrant prevent dimension mismatch between Gemini and SentenceTransformers?",
+    "expected_keywords": ["dimension", "3072", "768", "collection", "mismatch"],
+    "expected_source_type": "web_documentation"
+  }
+]

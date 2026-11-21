@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 import uuid
 
 import logfire
@@ -14,7 +14,17 @@ from qdrant_client.http import models
 from app.config import settings
 from app.ingestion.chunking.splitter import chunk_text
 from app.ingestion.loaders import parse_html, parse_office, parse_pdf, parse_text
-from app.services.retrival.embeddings import embed_texts, get_embedding_dim
+from app.services.retrieval.embeddings import (
+    embed_texts,
+    get_active_model_name,
+    get_embedding_dim,
+    get_model_type,
+)
+from app.services.retrieval.qdrant import (
+    ensure_collection,
+    get_qdrant_client,
+    resolve_collection_name,
+)
 
 try:
     logfire.configure(service_name="ingestion-service", send_to_logfire="if-token-present")
@@ -37,93 +47,6 @@ LOADER_MAP = {
     ".ppt": parse_office,
 }
 
-_qdrant_client: Optional[QdrantClient] = None
-
-
-def get_qdrant_client() -> QdrantClient:
-    """Lazily initializes and returns a singleton QdrantClient.
-
-    Attempts to connect to the remote Qdrant cluster if configured. If the remote
-    cluster is unreachable (e.g. cluster suspended, connection reset, or offline),
-    it gracefully falls back to local embedded Qdrant storage at './data/qdrant_storage'
-    so development and testing are never blocked.
-    """
-    global _qdrant_client
-    if _qdrant_client is not None:
-        return _qdrant_client
-
-    if settings.qdrant_url and settings.qdrant_url.startswith("http"):
-        try:
-            client = QdrantClient(
-                url=settings.qdrant_url,
-                api_key=settings.qdrant_api_key,
-                timeout=5.0,
-            )
-            # Lightweight probe to check if cluster is online and reachable
-            client.get_collections()
-            logfire.info(f"Connected to remote Qdrant cluster at {settings.qdrant_url}")
-            _qdrant_client = client
-            return _qdrant_client
-        except Exception as e:
-            logfire.warning(
-                f"Remote Qdrant cluster connection failed: {e}. "
-                "Falling back to local embedded Qdrant storage at './data/qdrant_storage'."
-            )
-
-    local_storage_path = Path("data") / "qdrant_storage"
-    local_storage_path.mkdir(parents=True, exist_ok=True)
-    _qdrant_client = QdrantClient(path=str(local_storage_path))
-    logfire.info(f"Initialized local embedded Qdrant storage at {local_storage_path}")
-    return _qdrant_client
-
-
-def ensure_collection(
-    client: QdrantClient,
-    collection_name: Optional[str] = None,
-    recreate: bool = False,
-) -> None:
-    """Ensures the target Qdrant collection exists with proper dimensions and indices.
-
-    If recreate=True, existing collection will be dropped and recreated.
-    """
-    col_name = collection_name or settings.qdrant_collection
-    vector_dim = get_embedding_dim()
-
-    with logfire.span("Ensure Qdrant collection", collection=col_name, dim=vector_dim, recreate=recreate):
-        exists = client.collection_exists(col_name)
-
-        if exists and recreate:
-            logfire.info(f"Dropping existing collection '{col_name}' as wipe requested")
-            client.delete_collection(col_name)
-            exists = False
-
-        if not exists:
-            logfire.info(f"Creating collection '{col_name}' with {vector_dim}-dim vectors")
-            client.create_collection(
-                collection_name=col_name,
-                vectors_config=models.VectorParams(
-                    size=vector_dim,
-                    distance=models.Distance.COSINE,
-                ),
-            )
-            # Create payload indices for fast filtering during retrieval (on remote Qdrant)
-            try:
-                client.create_payload_index(
-                    collection_name=col_name,
-                    field_name="source_type",
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                )
-                client.create_payload_index(
-                    collection_name=col_name,
-                    field_name="source_file",
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                )
-            except Exception:
-                pass
-            logfire.info(f"Collection '{col_name}' initialized successfully with payload indices")
-        else:
-            logfire.info(f"Collection '{col_name}' already exists and is ready")
-
 
 def save_processed_locally(data: Dict[str, Any], source_type: str, filename: str) -> str:
     """Saves parsed chunks and metadata as formatted JSON in processed_data/<source_type>/."""
@@ -144,15 +67,18 @@ def process_file(
     file_path: str,
     filename: Optional[str] = None,
     source_type: str = "generic",
+    collection_name: Optional[str] = None,
     upsert_batch_size: int = 50,
 ) -> Dict[str, Any]:
     """Full ETL Pipeline for a single document:
 
-    1. Parse (via appropriate file loader)
-    2. Chunk (with overlap and paragraph preservation)
-    3. Save local metadata JSON for audit/cache
-    4. Embed (Gemini or SentenceTransformers fallback)
-    5. Index/Upsert vectors into Qdrant with deterministic UUIDs
+    1. Enforce size limits
+    2. Parse (via appropriate file loader)
+    3. Chunk (with overlap and paragraph preservation)
+    4. Save local metadata JSON for audit/cache
+    5. Embed (Gemini or SentenceTransformers fallback)
+    6. Purge prior vectors for this document (stale chunk prevention)
+    7. Index/Upsert vectors into Qdrant with deterministic UUIDs and durability wait=True
     """
     path_obj = Path(file_path)
     if not path_obj.exists():
@@ -164,6 +90,18 @@ def process_file(
     if suffix not in LOADER_MAP:
         logfire.warning(f"Unsupported file format '{suffix}' for {file_path}. Skipping.")
         return {"status": "skipped_unsupported", "file": file_name, "reason": f"unsupported suffix {suffix}"}
+
+    # Pre-flight resource limit check
+    file_size = path_obj.stat().st_size
+    if file_size > settings.max_file_size_bytes:
+        logfire.warning(
+            f"File too large ({file_size} bytes, limit is {settings.max_file_size_bytes}): {file_name}. Skipping."
+        )
+        return {
+            "status": "skipped_too_large",
+            "file": file_name,
+            "reason": f"file size {file_size} exceeds limit {settings.max_file_size_bytes}",
+        }
 
     with logfire.span("Process file", file=file_name, source_type=source_type):
         loader = LOADER_MAP[suffix]
@@ -181,6 +119,10 @@ def process_file(
             return {"status": "skipped_no_chunks", "file": file_name}
 
         ingested_at = datetime.now(timezone.utc).isoformat()
+        model_type = get_model_type()
+        model_name = get_active_model_name()
+        vector_dim = get_embedding_dim()
+
         chunk_records: List[Dict[str, Any]] = []
 
         for i, chunk in enumerate(chunks):
@@ -196,6 +138,9 @@ def process_file(
                 "source_path": str(path_obj.resolve()),
                 "source_type": source_type,
                 "file_hash": file_hash,
+                "embedding_model": model_type,
+                "embedding_model_name": model_name,
+                "embedding_dim": vector_dim,
                 "ingested_at": ingested_at,
             })
 
@@ -206,6 +151,8 @@ def process_file(
                 "source_type": source_type,
                 "file_hash": file_hash,
                 "total_chunks": len(chunks),
+                "embedding_model": model_type,
+                "embedding_model_name": model_name,
                 "ingested_at": ingested_at,
                 "chunks": chunk_records,
             },
@@ -228,14 +175,39 @@ def process_file(
                 )
             )
 
-        # Upsert into Qdrant in batches
         client = get_qdrant_client()
-        col_name = settings.qdrant_collection
+        col_name = ensure_collection(client, collection_name=collection_name)
+
+        # ------------------------------------------------------------------
+        # Scoped Purge: Delete existing chunks for this document to prevent
+        # stale/duplicate vectors if the document content has been modified.
+        # ------------------------------------------------------------------
+        try:
+            client.delete(
+                collection_name=col_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="source_file",
+                                match=models.MatchValue(value=file_name),
+                            )
+                        ]
+                    )
+                ),
+                wait=True,
+            )
+            logfire.debug(f"Purged previous vectors for {file_name} in '{col_name}'")
+        except Exception as e:
+            logfire.warning(f"Could not purge previous points for {file_name} in '{col_name}': {e}")
+
+        # Upsert into Qdrant in batches with durability wait
         for i in range(0, len(points), upsert_batch_size):
             batch = points[i : i + upsert_batch_size]
             client.upsert(
                 collection_name=col_name,
                 points=batch,
+                wait=True,
             )
 
         logfire.info(
@@ -246,41 +218,48 @@ def process_file(
             "status": "success",
             "file": file_name,
             "source_type": source_type,
+            "collection": col_name,
             "chunks": len(chunks),
             "file_hash": file_hash,
             "local_artifact": local_artifact,
         }
 
 
-def process_directory(dir_path: str, source_type: str = "generic") -> Dict[str, Any]:
-    """Recursively processes every supported document in a given directory."""
+def _iter_supported_files(path_obj: Path) -> Iterator[Path]:
+    """Generator streaming supported file paths without accumulating all files into memory."""
+    for root, dirs, files in os.walk(path_obj):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "__pycache__")]
+        for f in files:
+            p = Path(root) / f
+            if p.suffix.lower() in LOADER_MAP:
+                yield p
+
+
+def process_directory(
+    dir_path: str,
+    source_type: str = "generic",
+    collection_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Recursively processes every supported document in a given directory using generator streaming."""
     path_obj = Path(dir_path)
     if not path_obj.exists() or not path_obj.is_dir():
         raise NotADirectoryError(f"Directory not found: {dir_path}")
 
     with logfire.span("Process directory", dir=str(dir_path), source_type=source_type):
-        files_to_process: List[Path] = []
-        for root, dirs, files in os.walk(path_obj):
-            # Exclude virtual environments and hidden dirs
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "__pycache__")]
-            for f in files:
-                p = Path(root) / f
-                if p.suffix.lower() in LOADER_MAP:
-                    files_to_process.append(p)
-
-        logfire.info(f"Found {len(files_to_process)} supported files in {dir_path}")
-
         results: List[Dict[str, Any]] = []
         success_count = 0
         skipped_count = 0
         error_count = 0
+        total_files = 0
 
-        for file_path in files_to_process:
+        for file_path in _iter_supported_files(path_obj):
+            total_files += 1
             try:
                 res = process_file(
                     file_path=str(file_path),
                     filename=file_path.name,
                     source_type=source_type,
+                    collection_name=collection_name,
                 )
                 results.append(res)
                 if res.get("status") == "success":
@@ -299,25 +278,26 @@ def process_directory(dir_path: str, source_type: str = "generic") -> Dict[str, 
         summary = {
             "directory": str(dir_path),
             "source_type": source_type,
-            "total_files": len(files_to_process),
+            "total_files": total_files,
             "successful": success_count,
             "skipped": skipped_count,
             "errors": error_count,
             "results": results,
         }
-        logfire.info(f"Directory processing complete: {summary}")
+        logfire.info(
+            f"Directory processing complete: {total_files} files, {success_count} success, {error_count} errors"
+        )
         return summary
 
 
 def run_universal_ingestion(
     base_dir: str = "data",
     explicit_source_type: Optional[str] = None,
+    collection_name: Optional[str] = None,
     wipe: bool = False,
 ) -> Dict[str, Any]:
     """Scans base_dir, automatically maps subdirectories to source_types,
-
     and ingests all documents into Qdrant.
-    Pass wipe=True to drop and recreate the collection before ingestion.
     """
     base_path = Path(base_dir)
     if not base_path.exists():
@@ -325,9 +305,9 @@ def run_universal_ingestion(
         logfire.info(f"Created base directory: {base_path}")
 
     client = get_qdrant_client()
-    ensure_collection(client, recreate=wipe)
+    target_col = ensure_collection(client, collection_name=collection_name, recreate=wipe)
 
-    with logfire.span("Universal ingestion", base_dir=str(base_dir), wipe=wipe):
+    with logfire.span("Universal ingestion", base_dir=str(base_dir), collection=target_col, wipe=wipe):
         subdirs = [d for d in base_path.iterdir() if d.is_dir() and not d.name.startswith(".")]
 
         summary_results: List[Dict[str, Any]] = []
@@ -335,11 +315,11 @@ def run_universal_ingestion(
         if subdirs:
             for subdir in subdirs:
                 source_type = explicit_source_type or subdir.name
-                res = process_directory(str(subdir), source_type=source_type)
+                res = process_directory(str(subdir), source_type=source_type, collection_name=target_col)
                 summary_results.append(res)
         else:
             source_type = explicit_source_type or "general"
-            res = process_directory(str(base_path), source_type=source_type)
+            res = process_directory(str(base_path), source_type=source_type, collection_name=target_col)
             summary_results.append(res)
 
         total_ingested = sum(r.get("successful", 0) for r in summary_results)
@@ -347,13 +327,14 @@ def run_universal_ingestion(
 
         final_report = {
             "base_dir": str(base_dir),
+            "collection": target_col,
             "wipe": wipe,
             "subdirectories_processed": len(summary_results),
             "total_successful_documents": total_ingested,
             "total_errors": total_errors,
             "details": summary_results,
         }
-        logfire.info(f"Universal ingestion finished: {final_report}")
+        logfire.info(f"Universal ingestion finished: {total_ingested} indexed, {total_errors} errors")
         return final_report
 
 
@@ -362,18 +343,20 @@ if __name__ == "__main__":
     parser.add_argument("--base-dir", type=str, default="data", help="Root data directory to scan")
     parser.add_argument("--file", type=str, default=None, help="Process a single file directly")
     parser.add_argument("--source-type", type=str, default=None, help="Explicit source type tag")
+    parser.add_argument("--collection", type=str, default=None, help="Custom Qdrant collection name")
     parser.add_argument("--wipe", action="store_true", help="Recreate Qdrant collection before ingestion")
 
     args = parser.parse_args()
 
     if args.file:
         st = args.source_type or "manual"
-        res = process_file(args.file, source_type=st)
+        res = process_file(args.file, source_type=st, collection_name=args.collection)
         print(json.dumps(res, indent=2))
     else:
         report = run_universal_ingestion(
             base_dir=args.base_dir,
             explicit_source_type=args.source_type,
+            collection_name=args.collection,
             wipe=args.wipe,
         )
         print(json.dumps(report, indent=2))
